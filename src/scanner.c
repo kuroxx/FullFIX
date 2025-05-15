@@ -29,10 +29,74 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define _GNU_SOURCE
 
 #include "fix_impl.h"
+#include <stdint.h>  // For hash implementation
 
 #ifdef USE_SSE
 #include <xmmintrin.h>
 #endif
+
+// Log hash table implementation to avoid duplicates
+#define LOG_HASH_SIZE 256
+#define FNV_PRIME 16777619
+#define FNV_OFFSET 2166136261
+
+typedef struct {
+    char* entries[LOG_HASH_SIZE];
+    uint32_t entry_lens[LOG_HASH_SIZE];
+    bool occupied[LOG_HASH_SIZE];
+} log_hash_table;
+
+static log_hash_table log_table = {{0}};
+
+// FNV-1a hash function for strings
+static 
+uint32_t hash_string(const char* str, size_t len) {
+    uint32_t hash = FNV_OFFSET;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= (uint8_t)str[i];
+        hash *= FNV_PRIME;
+    }
+    return hash;
+}
+
+// Check if a log entry exists, add if not
+static
+bool log_entry_exists(const char* entry, size_t len) {
+    uint32_t hash = hash_string(entry, len) % LOG_HASH_SIZE;
+    uint32_t initial_hash = hash;
+    
+    while (log_table.occupied[hash]) {
+        if (log_table.entry_lens[hash] == len &&
+            memcmp(log_table.entries[hash], entry, len) == 0) {
+            return true;  // Found a duplicate
+        }
+        hash = (hash + 1) % LOG_HASH_SIZE;
+        if (hash == initial_hash) break;  // Table is full
+    }
+    
+    // Not found, add it
+    char* new_entry = malloc(len + 1);
+    if (!new_entry) return false;  // Out of memory
+    
+    memcpy(new_entry, entry, len);
+    new_entry[len] = '\0';
+    
+    log_table.entries[hash] = new_entry;
+    log_table.entry_lens[hash] = len;
+    log_table.occupied[hash] = true;
+    
+    return false;
+}
+
+// Free the log hash table
+void free_log_table(void) {
+    for (int i = 0; i < LOG_HASH_SIZE; i++) {
+        if (log_table.occupied[i]) {
+            free(log_table.entries[i]);
+            log_table.occupied[i] = false;
+        }
+    }
+}
 
 // message buffer handling
 static
@@ -42,8 +106,11 @@ char* make_space(fix_parser* const parser, char* dest, unsigned extra_len)
 
 	if(len > parser->body_capacity)
 	{
-		// reallocate memory
-		char* const p = realloc(parser->body, len);
+		// reallocate memory with growth factor to reduce reallocations
+		unsigned new_capacity = parser->body_capacity * 2;
+		if (new_capacity < len) new_capacity = len;
+		
+		char* const p = realloc(parser->body, new_capacity);
 
 		if(!p)
 		{
@@ -59,7 +126,7 @@ char* make_space(fix_parser* const parser, char* dest, unsigned extra_len)
 
 		// store new pointer
 		parser->body = p;
-		parser->body_capacity = len;
+		parser->body_capacity = new_capacity;
 	}
 
 	return dest;
@@ -204,6 +271,17 @@ bool valid_checksum(const scanner_state* const state)
 	return cs2 <= 9 && cs1 <= 9 && cs0 <= 9 && (unsigned)state->check_sum == cs2 * 100 + cs1 * 10 + cs0;
 }
 
+// Enhanced logging function
+bool log_unique_test_result(const char* log_message) {
+    size_t len = strlen(log_message);
+    if (!log_entry_exists(log_message, len)) {
+        // Log the message to the actual logging system
+        // This part would interface with the existing logging mechanism
+        return true;
+    }
+    return false;
+}
+
 // scanner
 bool extract_next_message(fix_parser* const parser)
 {
@@ -339,6 +417,3 @@ EXIT:
 	parser->body_length = state->dest - parser->body;
 	return false;
 }
-
-
-
